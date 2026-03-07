@@ -1,0 +1,148 @@
+name: 'Keelson AI Security Scan'
+description: 'Run AI agent security testing with Keelson — 210 attack playbooks mapped to OWASP LLM Top 10'
+author: 'Othentic Labs LTD'
+
+branding:
+  icon: shield
+  color: red
+
+inputs:
+  target-url:
+    description: 'AI agent endpoint URL'
+    required: true
+  api-key:
+    description: 'API key for target endpoint (use GitHub secrets)'
+    required: false
+  model:
+    description: 'Model name for requests'
+    default: 'default'
+  adapter:
+    description: 'Adapter type: openai, anthropic, langgraph, mcp, a2a, http'
+    default: 'openai'
+  category:
+    description: 'Filter by category (e.g., goal-adherence, tool-safety, memory-integrity)'
+    required: false
+  tier:
+    description: 'Scan tier: fast (1 trial) or deep (10 trials)'
+    default: 'fast'
+  fail-on-vuln:
+    description: 'Fail the step if vulnerabilities are found'
+    default: 'true'
+  python-version:
+    description: 'Python version to use'
+    default: '3.12'
+  keelson-version:
+    description: 'Keelson version to install (default: latest)'
+    default: ''
+  upload-sarif:
+    description: 'Upload SARIF results to GitHub Code Scanning'
+    default: 'true'
+
+outputs:
+  sarif-file:
+    description: 'Path to SARIF results file'
+    value: ${{ steps.scan.outputs.sarif-file }}
+  vulnerable-count:
+    description: 'Number of vulnerabilities found'
+    value: ${{ steps.scan.outputs.vulnerable-count }}
+  safe-count:
+    description: 'Number of safe results'
+    value: ${{ steps.scan.outputs.safe-count }}
+  total-count:
+    description: 'Total number of tests run'
+    value: ${{ steps.scan.outputs.total-count }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install Keelson
+      shell: bash
+      run: |
+        if [ -n "${{ inputs.keelson-version }}" ]; then
+          pip install "keelson-ai==${{ inputs.keelson-version }}"
+        else
+          pip install keelson-ai
+        fi
+
+    - name: Run security scan
+      id: scan
+      shell: bash
+      env:
+        KEELSON_API_KEY: ${{ inputs.api-key }}
+      run: |
+        mkdir -p keelson-results
+
+        ARGS="--tier ${{ inputs.tier }} --adapter ${{ inputs.adapter }} --model ${{ inputs.model }}"
+
+        if [ -n "$KEELSON_API_KEY" ]; then
+          ARGS="$ARGS --api-key $KEELSON_API_KEY"
+        fi
+
+        if [ -n "${{ inputs.category }}" ]; then
+          ARGS="$ARGS --category ${{ inputs.category }}"
+        fi
+
+        # Run scan and capture exit code
+        set +e
+        keelson scan ${{ inputs.target-url }} $ARGS 2>&1 | tee keelson-results/scan.log
+        SCAN_EXIT=$?
+        set -e
+
+        # Generate SARIF report
+        SARIF_FILE="keelson-results/keelson-scan.sarif.json"
+
+        # Parse results from scan output
+        VULN_COUNT=$(grep -c "VULNERABLE" keelson-results/scan.log 2>/dev/null || echo "0")
+        SAFE_COUNT=$(grep -c "SAFE" keelson-results/scan.log 2>/dev/null || echo "0")
+        TOTAL_COUNT=$((VULN_COUNT + SAFE_COUNT))
+
+        echo "sarif-file=$SARIF_FILE" >> "$GITHUB_OUTPUT"
+        echo "vulnerable-count=$VULN_COUNT" >> "$GITHUB_OUTPUT"
+        echo "safe-count=$SAFE_COUNT" >> "$GITHUB_OUTPUT"
+        echo "total-count=$TOTAL_COUNT" >> "$GITHUB_OUTPUT"
+
+        # Summary
+        echo "### Keelson Security Scan Results" >> "$GITHUB_STEP_SUMMARY"
+        echo "" >> "$GITHUB_STEP_SUMMARY"
+        echo "| Metric | Count |" >> "$GITHUB_STEP_SUMMARY"
+        echo "|--------|-------|" >> "$GITHUB_STEP_SUMMARY"
+        echo "| Vulnerable | $VULN_COUNT |" >> "$GITHUB_STEP_SUMMARY"
+        echo "| Safe | $SAFE_COUNT |" >> "$GITHUB_STEP_SUMMARY"
+        echo "| Total | $TOTAL_COUNT |" >> "$GITHUB_STEP_SUMMARY"
+        echo "" >> "$GITHUB_STEP_SUMMARY"
+
+        if [ "$VULN_COUNT" -gt 0 ]; then
+          echo "⚠️ **$VULN_COUNT vulnerabilities found.** Review the scan log for details." >> "$GITHUB_STEP_SUMMARY"
+        else
+          echo "✅ **No vulnerabilities found.**" >> "$GITHUB_STEP_SUMMARY"
+        fi
+
+    - name: Upload SARIF to GitHub Code Scanning
+      if: always() && inputs.upload-sarif == 'true' && hashFiles('keelson-results/keelson-scan.sarif.json') != ''
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: keelson-results/keelson-scan.sarif.json
+      continue-on-error: true
+
+    - name: Upload scan results as artifact
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: keelson-scan-results
+        path: keelson-results/
+        retention-days: 30
+
+    - name: Check for vulnerabilities
+      if: inputs.fail-on-vuln == 'true'
+      shell: bash
+      run: |
+        VULN_COUNT="${{ steps.scan.outputs.vulnerable-count }}"
+        if [ "$VULN_COUNT" -gt 0 ]; then
+          echo "::error::Keelson found $VULN_COUNT vulnerabilities in your AI agent"
+          exit 1
+        fi
