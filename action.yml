@@ -1,5 +1,5 @@
 name: 'Keelson AI Security Scan'
-description: 'Run AI agent security testing with Keelson — 210 probe playbooks mapped to OWASP LLM Top 10'
+description: 'Living Red Team for AI agents — adaptive security testing with 210 probe playbooks mapped to OWASP LLM Top 10'
 author: 'Othentic Labs LTD'
 
 branding:
